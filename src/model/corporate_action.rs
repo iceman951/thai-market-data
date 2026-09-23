@@ -2,7 +2,7 @@ use super::{non_empty, non_negative, safe_counts, validate_date, Validate};
 use serde::{Deserialize, Serialize};
 
 // Mirrors production corporate_action; id and created_at are set by D1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CorporateAction {
     pub symbol: String,
     pub orderbook_id: Option<i64>,

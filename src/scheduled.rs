@@ -1,4 +1,4 @@
-use crate::{collector::provider::MockProvider, ingestion};
+use crate::{collector::mock::MockProvider, ingestion};
 use worker::{wasm_bindgen::JsValue, Env, Result, ScheduleContext, ScheduledEvent};
 
 #[worker::event(scheduled)]

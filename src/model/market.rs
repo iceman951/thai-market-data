@@ -2,7 +2,7 @@ use super::{non_empty, non_negative, safe_counts, validate_record, Validate};
 use serde::{Deserialize, Serialize};
 
 // Mirrors production market_stat; created_at is set by D1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MarketStat {
     pub trade_date: String,
     pub data_round: Option<String>,
@@ -10,8 +10,12 @@ pub struct MarketStat {
     pub trading_currency: String,
     pub total_trades: Option<i64>,
     pub total_quantity: Option<i64>,
-    // The column is INTEGER, but a baht value may carry satang. SQLite stores
-    // whole numbers as INTEGER and keeps fractional ones without truncation.
+    // Production declares this column INTEGER. f64 is deliberate: SQLite stores
+    // a whole number as INTEGER and a fractional one as REAL, so satang are
+    // never truncated, whereas i64 would reject or round a fractional source.
+    // TODO: once a real provider exists, check its actual type for this field,
+    // then either make this i64 (always whole baht) or migrate the D1 column
+    // to REAL (fractional). Do not truncate in the meantime.
     pub total_value: Option<f64>,
     pub up_quantity: Option<i64>,
     pub down_quantity: Option<i64>,

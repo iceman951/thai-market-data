@@ -4,7 +4,7 @@ Rust Cloudflare Worker foundation for collecting daily Thai capital market data.
 
 ## Architecture
 
-The scheduled handler runs six dataset fetches. Each one archives the provider's exact JSON in R2, deserializes and validates it, writes normalized rows to D1, and records an ingestion result. `GET /health` is the only HTTP route. See [architecture](docs/architecture.md).
+The scheduled handler runs six dataset fetches. Each one archives the provider's exact response in R2, has the provider normalize it into canonical models, validates those rows, writes them to D1 in batches of 100, and records an ingestion result. `GET /health` is the only HTTP route. See [architecture](docs/architecture.md).
 
 ## Prerequisites and local setup
 

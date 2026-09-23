@@ -2,7 +2,7 @@ use super::{non_empty, non_negative, validate_record, Validate};
 use serde::{Deserialize, Serialize};
 
 // Mirrors production investor_stat; created_at is set by D1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InvestorStat {
     pub trade_date: String,
     pub data_round: Option<String>,

@@ -2,7 +2,7 @@ use super::{finite, non_negative, validate_record, Validate};
 use serde::{Deserialize, Serialize};
 
 // Mirrors production index_stat; created_at is set by D1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexStat {
     pub trade_date: String,
     pub data_round: Option<String>,

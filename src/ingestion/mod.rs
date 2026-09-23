@@ -1,68 +1,46 @@
 use crate::{
     collector::provider::MarketDataProvider,
-    model::{
-        corporate_action::CorporateAction, index::IndexStat, investor::InvestorStat,
-        market::MarketStat, security::SecurityStat, security_update::SecurityUpdate, Dataset,
-        IngestionLog, IngestionStatus, Validate,
-    },
+    model::{CanonicalRows, Dataset, IngestionLog, IngestionStatus},
     storage::{d1, r2},
 };
-use serde::de::DeserializeOwned;
 use worker::{Bucket, D1Database, Error, Result};
 
 fn now_iso() -> String {
     worker::js_sys::Date::new_0().to_iso_string().into()
 }
 
-fn decode<T: DeserializeOwned + Validate>(payload: &str, date: &str) -> Result<Vec<T>> {
-    let rows: Vec<T> =
-        serde_json::from_str(payload).map_err(|e| Error::RustError(e.to_string()))?;
-    for row in &rows {
-        row.validate(date).map_err(Error::RustError)?;
-    }
+/// Maps a raw payload to canonical rows with the provider's own normalizer,
+/// then applies the provider-independent validation. Ingestion never parses a
+/// source payload itself.
+fn normalize<P: MarketDataProvider>(
+    provider: &P,
+    dataset: Dataset,
+    raw: &str,
+    date: &str,
+) -> std::result::Result<CanonicalRows, String> {
+    let rows = match dataset {
+        Dataset::SecurityStat => {
+            CanonicalRows::SecurityStat(provider.normalize_security_stat(raw, date)?)
+        }
+        Dataset::IndexStat => CanonicalRows::IndexStat(provider.normalize_index_stat(raw, date)?),
+        Dataset::MarketStat => {
+            CanonicalRows::MarketStat(provider.normalize_market_stat(raw, date)?)
+        }
+        Dataset::InvestorStat => {
+            CanonicalRows::InvestorStat(provider.normalize_investor_stat(raw, date)?)
+        }
+        Dataset::SecurityUpdate => {
+            CanonicalRows::SecurityUpdate(provider.normalize_security_update(raw, date)?)
+        }
+        Dataset::CorporateAction => {
+            CanonicalRows::CorporateAction(provider.normalize_corporate_action(raw, date)?)
+        }
+    };
+    rows.validate(date)?;
     Ok(rows)
 }
 
-async fn ingest_payload(
-    db: &D1Database,
-    dataset: Dataset,
-    payload: &str,
-    date: &str,
-) -> Result<usize> {
-    match dataset {
-        Dataset::SecurityStat => {
-            let rows = decode::<SecurityStat>(payload, date)?;
-            d1::upsert_security_stat(db, &rows).await?;
-            Ok(rows.len())
-        }
-        Dataset::IndexStat => {
-            let rows = decode::<IndexStat>(payload, date)?;
-            d1::upsert_index_stat(db, &rows).await?;
-            Ok(rows.len())
-        }
-        Dataset::MarketStat => {
-            let rows = decode::<MarketStat>(payload, date)?;
-            d1::upsert_market_stat(db, &rows).await?;
-            Ok(rows.len())
-        }
-        Dataset::InvestorStat => {
-            let rows = decode::<InvestorStat>(payload, date)?;
-            d1::upsert_investor_stat(db, &rows).await?;
-            Ok(rows.len())
-        }
-        Dataset::SecurityUpdate => {
-            let rows = decode::<SecurityUpdate>(payload, date)?;
-            d1::upsert_security_update(db, &rows).await?;
-            Ok(rows.len())
-        }
-        Dataset::CorporateAction => {
-            let rows = decode::<CorporateAction>(payload, date)?;
-            d1::insert_corporate_action(db, &rows).await?;
-            Ok(rows.len())
-        }
-    }
-}
-
+/// fetch -> R2 key -> archive exact raw -> normalize -> validate -> D1 -> log.
 pub async fn run_dataset<P: MarketDataProvider>(
     provider: &P,
     db: &D1Database,
@@ -72,13 +50,17 @@ pub async fn run_dataset<P: MarketDataProvider>(
 ) -> Result<usize> {
     let started_at = now_iso();
     let outcome: Result<usize> = async {
-        let payload = provider
+        let raw = provider
             .fetch(dataset, date)
             .await
             .map_err(Error::RustError)?;
         let key = r2::raw_key(provider.name(), dataset, date)?;
-        r2::archive(bucket, &key, &payload).await?;
-        ingest_payload(db, dataset, &payload, date).await
+        // Archived before normalizing, so an unparseable payload is still kept.
+        r2::archive(bucket, &key, &raw).await?;
+        let rows = normalize(provider, dataset, &raw, date).map_err(Error::RustError)?;
+        // Written in batches; a failure can leave earlier batches in D1 (see d1::write_rows).
+        d1::write_dataset(db, &rows).await?;
+        Ok(rows.row_count())
     }
     .await;
 
@@ -153,90 +135,158 @@ pub async fn run_all<P: MarketDataProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        collector::mock::{self, MockProvider},
+        model::{
+            corporate_action::CorporateAction, index::IndexStat, investor::InvestorStat,
+            market::MarketStat, security::SecurityStat, security_update::SecurityUpdate,
+        },
+    };
+    use serde::Deserialize;
 
     const DATE: &str = "2026-09-24";
 
-    #[test]
-    fn security_stat_requires_key_and_valid_ranges() {
-        let row = r#"{"trade_date":"2026-09-24","market_code":"XBKK","orderbook_id":1,"symbol":"ABC","low":1.0,"high":2.0,"eps":-0.5,"listed_shares":1000}"#;
-        assert_eq!(
-            decode::<SecurityStat>(&format!("[{row}]"), DATE)
-                .unwrap()
-                .len(),
-            1
-        );
-        for bad in [
-            r#"{"trade_date":"2026-09-24","market_code":"XBKK","orderbook_id":1,"symbol":"ABC","low":2.0,"high":1.0}"#,
-            r#"{"trade_date":"2026-09-25","market_code":"XBKK","orderbook_id":1,"symbol":"ABC"}"#,
-            r#"{"trade_date":"2026-09-24","market_code":" ","orderbook_id":1,"symbol":"ABC"}"#,
-            r#"{"trade_date":"2026-09-24","market_code":"XBKK","symbol":"ABC"}"#,
-            r#"{"trade_date":"2026-09-24","market_code":"XBKK","orderbook_id":9007199254740992,"symbol":"ABC"}"#,
-        ] {
-            assert!(
-                decode::<SecurityStat>(&format!("[{bad}]"), DATE).is_err(),
-                "{bad}"
-            );
+    /// A source whose payload uses its own field names, like a real vendor.
+    struct VendorProvider;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct VendorQuote {
+        trade_date: String,
+        order_book_id: i64,
+        symbol: String,
+        high: Option<f64>,
+        low: Option<f64>,
+        last: Option<f64>,
+    }
+
+    impl MarketDataProvider for VendorProvider {
+        fn name(&self) -> &'static str {
+            "vendor"
+        }
+        async fn fetch(&self, _: Dataset, _: &str) -> std::result::Result<String, String> {
+            Err("not used".into())
+        }
+        fn normalize_security_stat(
+            &self,
+            raw: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<SecurityStat>, String> {
+            let quotes: Vec<VendorQuote> = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            Ok(quotes
+                .into_iter()
+                .map(|q| SecurityStat {
+                    trade_date: q.trade_date,
+                    market_code: "XBKK".into(),
+                    orderbook_id: q.order_book_id,
+                    symbol: q.symbol,
+                    high: q.high,
+                    low: q.low,
+                    last_traded_price: q.last,
+                    ..Default::default()
+                })
+                .collect())
+        }
+        fn normalize_index_stat(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<IndexStat>, String> {
+            Err("unsupported".into())
+        }
+        fn normalize_market_stat(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<MarketStat>, String> {
+            Err("unsupported".into())
+        }
+        fn normalize_investor_stat(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<InvestorStat>, String> {
+            Err("unsupported".into())
+        }
+        fn normalize_security_update(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<SecurityUpdate>, String> {
+            Err("unsupported".into())
+        }
+        fn normalize_corporate_action(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<CorporateAction>, String> {
+            Err("unsupported".into())
         }
     }
 
+    const VENDOR_RAW: &str = r#"[{"tradeDate":"2026-09-24","orderBookId":42,"symbol":"PTT","high":35.0,"low":34.0,"last":34.5}]"#;
+
     #[test]
-    fn index_stat_allows_negative_change() {
-        let rows = decode::<IndexStat>(
-            r#"[{"trade_date":"2026-09-24","index_name":"SET","index_value":1400.5,"change":-3.2,"pe":-1.0}]"#,
-            DATE,
-        )
-        .unwrap();
-        assert_eq!(rows[0].index_name, "SET");
-        assert!(decode::<IndexStat>(
-            r#"[{"trade_date":"2026-09-24","index_name":"SET","low":2.0,"high":1.0}]"#,
-            DATE
-        )
-        .is_err());
+    fn vendor_payload_goes_through_provider_normalizer() {
+        let rows = normalize(&VendorProvider, Dataset::SecurityStat, VENDOR_RAW, DATE).unwrap();
+        let CanonicalRows::SecurityStat(rows) = rows else {
+            panic!("wrong dataset variant");
+        };
+        assert_eq!(rows[0].orderbook_id, 42);
+        assert_eq!(rows[0].last_traded_price, Some(34.5));
+        // The raw payload is not in canonical shape; direct deserialization would fail.
+        assert!(serde_json::from_str::<Vec<SecurityStat>>(VENDOR_RAW).is_err());
     }
 
     #[test]
-    fn market_and_investor_keys_are_required() {
-        assert!(decode::<MarketStat>(
-            r#"[{"trade_date":"2026-09-24","market_stat_id":"SET","trading_currency":"THB","total_value":1.5}]"#,
-            DATE
-        )
-        .is_ok());
-        assert!(decode::<MarketStat>(
-            r#"[{"trade_date":"2026-09-24","market_stat_id":"SET"}]"#,
-            DATE
-        )
-        .is_err());
-        assert!(decode::<InvestorStat>(
-            r#"[{"trade_date":"2026-09-24","period_type":"DAILY","market_segment":"SET","trading_currency":"THB"}]"#,
-            DATE
-        )
-        .is_ok());
-        assert!(decode::<InvestorStat>(
-            r#"[{"trade_date":"2026-09-24","period_type":"","market_segment":"SET","trading_currency":"THB"}]"#,
-            DATE
-        )
-        .is_err());
+    fn normalization_leaves_raw_payload_untouched() {
+        let raw = VENDOR_RAW.to_string();
+        normalize(&VendorProvider, Dataset::SecurityStat, &raw, DATE).unwrap();
+        assert_eq!(raw, VENDOR_RAW);
     }
 
     #[test]
-    fn security_update_uses_report_date() {
-        let row =
-            r#"{"report_date":"2026-09-24","market_code":"XBKK","orderbook_id":1,"symbol":"ABC"}"#;
-        assert!(decode::<SecurityUpdate>(&format!("[{row}]"), DATE).is_ok());
-        assert!(decode::<SecurityUpdate>(&format!("[{row}]"), "2026-09-23").is_err());
+    fn validation_runs_after_normalization() {
+        let bad = r#"[{"tradeDate":"2026-09-24","orderBookId":42,"symbol":"PTT","high":34.0,"low":35.0}]"#;
+        assert_eq!(
+            normalize(&VendorProvider, Dataset::SecurityStat, bad, DATE).unwrap_err(),
+            "row 0: low exceeds high"
+        );
+        let wrong_day = VENDOR_RAW.replace("2026-09-24", "2026-09-23");
+        assert!(normalize(&VendorProvider, Dataset::SecurityStat, &wrong_day, DATE).is_err());
     }
 
     #[test]
-    fn corporate_action_dates_are_independent_of_run_date() {
-        assert!(decode::<CorporateAction>(
-            r#"[{"symbol":"ABC","event_type":"XD","ex_date":"2026-10-15","cash_dividend":0.5}]"#,
-            DATE
-        )
-        .is_ok());
-        assert!(decode::<CorporateAction>(
-            r#"[{"symbol":"ABC","event_type":"XD","ex_date":"2026-02-30"}]"#,
-            DATE
-        )
-        .is_err());
+    fn normalizer_errors_are_reported() {
+        assert!(normalize(&VendorProvider, Dataset::SecurityStat, "not json", DATE).is_err());
+        assert_eq!(
+            normalize(&VendorProvider, Dataset::IndexStat, "[]", DATE).unwrap_err(),
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn mock_payloads_normalize_into_each_canonical_model() {
+        for dataset in Dataset::ALL {
+            let raw = mock::raw_payload(dataset, DATE);
+            assert_eq!(
+                raw,
+                mock::raw_payload(dataset, DATE),
+                "retry must match archive"
+            );
+            let rows = normalize(&MockProvider, dataset, &raw, DATE)
+                .unwrap_or_else(|e| panic!("{}: {e}", dataset.table()));
+            assert_eq!(rows.row_count(), 1, "{}", dataset.table());
+            let variant_matches = matches!(
+                (dataset, &rows),
+                (Dataset::SecurityStat, CanonicalRows::SecurityStat(_))
+                    | (Dataset::IndexStat, CanonicalRows::IndexStat(_))
+                    | (Dataset::MarketStat, CanonicalRows::MarketStat(_))
+                    | (Dataset::InvestorStat, CanonicalRows::InvestorStat(_))
+                    | (Dataset::SecurityUpdate, CanonicalRows::SecurityUpdate(_))
+                    | (Dataset::CorporateAction, CanonicalRows::CorporateAction(_))
+            );
+            assert!(variant_matches, "{}", dataset.table());
+        }
     }
 }

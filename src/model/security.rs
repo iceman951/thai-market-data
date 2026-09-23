@@ -2,7 +2,7 @@ use super::{finite, non_empty, non_negative, safe_counts, validate_record, Valid
 use serde::{Deserialize, Serialize};
 
 // Mirrors production security_stat; created_at is set by D1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityStat {
     pub trade_date: String,
     pub market_code: String,
