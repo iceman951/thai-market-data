@@ -19,7 +19,7 @@ Set the existing D1 `database_id` and an R2 `bucket_name` in `wrangler.jsonc`. T
 
 ### Schema
 
-`migrations/0001_initial.sql` mirrors the manually created production D1 tables, keys, and indexes. Its `CREATE ... IF NOT EXISTS` statements leave existing remote tables untouched, so applying it remotely only records the migration. If the production schema changes, update the migration, the models in `src/model/`, and `src/storage/d1.rs` together. To compare against the live database:
+`migrations/0001_initial.sql` defines the intended local tables, keys, and indexes. The live D1 DDL has not been verified in this repository. Compare the live columns, types, keys, and indexes against the migration, models in `src/model/`, and writes in `src/storage/d1.rs` before applying it remotely. `CREATE ... IF NOT EXISTS` does not detect differences in existing tables. To inspect the live database:
 
 ```sh
 npx wrangler d1 execute thai-market-eod --remote --command "SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' ORDER BY name"

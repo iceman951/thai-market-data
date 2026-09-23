@@ -1,5 +1,5 @@
--- Mirrors the manually created production D1 schema (sqlite_master, 2026-09-24).
--- CREATE ... IF NOT EXISTS leaves the existing remote tables and indexes untouched.
+-- Intended local schema. Compare it with the manually created production D1
+-- schema before applying remotely; IF NOT EXISTS does not check compatibility.
 CREATE TABLE IF NOT EXISTS security_stat (
     trade_date TEXT NOT NULL,
     market_code TEXT NOT NULL,

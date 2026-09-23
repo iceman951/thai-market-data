@@ -21,4 +21,4 @@ This service does not calculate returns, volatility, beta, or other analytics. K
 
 ## Current schema contract
 
-The migration mirrors the manually created production schema. The models in `src/model/` and the column lists in `src/storage/d1.rs` must match it; each column list and its bind values share a compile-time length. `tests/schema_idempotency.mjs` checks the primary keys the upserts depend on.
+The migration defines the intended local schema; the manually created production schema still needs comparison before remote migration or deployment. The models in `src/model/` and the column lists in `src/storage/d1.rs` must match the live schema; each column list and its bind values share a compile-time length. `tests/schema_idempotency.mjs` checks the local primary keys the upserts depend on.

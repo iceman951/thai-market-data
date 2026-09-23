@@ -11,7 +11,7 @@ const count = table => db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
 const primaryKey = table => db.prepare(`PRAGMA table_info(${table})`).all()
   .filter(c => c.pk > 0).sort((a, b) => a.pk - b.pk).map(c => c.name);
 
-// Keys must match the production tables, since the writer's ON CONFLICT targets depend on them.
+// Local keys must also be checked against production before deployment.
 assert.deepEqual(primaryKey('security_stat'), ['trade_date', 'market_code', 'orderbook_id']);
 assert.deepEqual(primaryKey('index_stat'), ['trade_date', 'index_name']);
 assert.deepEqual(primaryKey('market_stat'), ['trade_date', 'market_stat_id', 'trading_currency']);
